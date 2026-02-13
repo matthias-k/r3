@@ -1,0 +1,126 @@
+"""Unit tests for `r3.remote`."""
+
+from pathlib import Path
+from typing import Any, Dict
+
+import boto3
+import pytest
+import yaml
+from moto import mock_aws
+
+from r3.remote import Remote, S3Remote
+
+BUCKET_NAME = "test-bucket"
+PREFIX = "jobs/"
+
+
+@pytest.fixture
+def job_dir(tmp_path: Path) -> Path:
+    job_path = tmp_path / "test-job-id"
+    job_path.mkdir()
+    (job_path / "r3.yaml").write_text(
+        yaml.dump({"dependencies": [], "timestamp": "2024-01-01T00:00:00"})
+    )
+    (job_path / "metadata.yaml").write_text(yaml.dump({"tags": ["test"]}))
+    (job_path / "run.py").write_text("print('hello')")
+    (job_path / "output").mkdir()
+    (job_path / "output" / "result.txt").write_text("result data")
+    return job_path
+
+
+@pytest.fixture
+def s3_remote():
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket=BUCKET_NAME)
+        yield S3Remote(bucket=BUCKET_NAME, prefix=PREFIX)
+
+
+def test_s3_remote_upload_and_exists(s3_remote: S3Remote, job_dir: Path):
+    s3_remote.upload("test-job-id", job_dir)
+    assert s3_remote.exists("test-job-id")
+
+
+def test_s3_remote_upload_and_download(
+    s3_remote: S3Remote, job_dir: Path, tmp_path: Path
+):
+    s3_remote.upload("test-job-id", job_dir)
+
+    download_path = tmp_path / "downloaded-job"
+    s3_remote.download("test-job-id", download_path)
+
+    assert (download_path / "r3.yaml").read_text() == (job_dir / "r3.yaml").read_text()
+    assert (download_path / "metadata.yaml").read_text() == (
+        job_dir / "metadata.yaml"
+    ).read_text()
+    assert (download_path / "run.py").read_text() == (job_dir / "run.py").read_text()
+    assert (download_path / "output" / "result.txt").read_text() == (
+        job_dir / "output" / "result.txt"
+    ).read_text()
+
+
+def test_s3_remote_remove(s3_remote: S3Remote, job_dir: Path):
+    s3_remote.upload("test-job-id", job_dir)
+    assert s3_remote.exists("test-job-id")
+
+    s3_remote.remove("test-job-id")
+    assert not s3_remote.exists("test-job-id")
+
+
+def test_s3_remote_exists_returns_false_for_missing_job(s3_remote: S3Remote):
+    assert not s3_remote.exists("nonexistent-job-id")
+
+
+def test_s3_remote_download_raises_for_missing_job(
+    s3_remote: S3Remote, tmp_path: Path
+):
+    with pytest.raises(FileNotFoundError):
+        s3_remote.download("nonexistent-job-id", tmp_path / "destination")
+
+
+def test_s3_remote_with_empty_prefix(job_dir: Path, tmp_path: Path):
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket=BUCKET_NAME)
+
+        remote = S3Remote(bucket=BUCKET_NAME, prefix="")
+        remote.upload("test-job-id", job_dir)
+        assert remote.exists("test-job-id")
+
+        download_path = tmp_path / "downloaded-job"
+        remote.download("test-job-id", download_path)
+
+        assert (download_path / "r3.yaml").read_text() == (
+            job_dir / "r3.yaml"
+        ).read_text()
+        assert (download_path / "output" / "result.txt").read_text() == (
+            job_dir / "output" / "result.txt"
+        ).read_text()
+
+
+def test_s3_remote_from_config():
+    config: Dict[str, Any] = {
+        "type": "s3",
+        "bucket": "my-bucket",
+        "prefix": "my-prefix/",
+    }
+    remote = Remote.from_config(config)
+    assert isinstance(remote, S3Remote)
+    assert remote.bucket == "my-bucket"
+    assert remote.prefix == "my-prefix/"
+
+
+def test_s3_remote_from_config_with_optional_fields():
+    config: Dict[str, Any] = {
+        "type": "s3",
+        "bucket": "my-bucket",
+        "prefix": "my-prefix/",
+        "profile": "my-profile",
+        "endpoint_url": "http://localhost:9000",
+    }
+    remote = Remote.from_config(config)
+    assert isinstance(remote, S3Remote)
+    assert remote.bucket == "my-bucket"
+    assert remote.prefix == "my-prefix/"
+    assert remote.profile == "my-profile"
+    assert remote.endpoint_url == "http://localhost:9000"
