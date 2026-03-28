@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import pytest
 from pyfakefs.fake_filesystem import FakeFilesystem
 
 import r3.utils
